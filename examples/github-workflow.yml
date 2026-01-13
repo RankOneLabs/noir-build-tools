@@ -1,0 +1,37 @@
+name: Noir Circuit CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  profile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Nargo
+        run: |
+          curl -L https://raw.githubusercontent.com/noir-lang/noirup/main/install | bash
+          ~/.nargo/bin/noirup
+          echo "$HOME/.nargo/bin" >> $GITHUB_PATH
+      
+      - name: Install jq
+        run: sudo apt-get install -y jq
+      
+      - name: Install noir-build-tools
+        run: |
+          git clone https://github.com/RankOneLabs/noir-build-tools.git /tmp/nbt
+          echo "/tmp/nbt/bin" >> $GITHUB_PATH
+      
+      - name: Profile (Budget Check)
+        run: noir-profile --all
+      
+      - name: Benchmark
+        run: noir-benchmark --all --csv > results.csv
+      
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmarks
+          path: results.csv

@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_PATH="$(readlink -f "$0")"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../.." 2>/dev/null && pwd)"
+
+LIB_DIR=""
+for candidate in \
+  "$ROOT_DIR/lib" \
+  "$SCRIPT_DIR/../lib" \
+  "${NOIR_BUILD_TOOLS_LIB:-}" \
+  "$HOME/.local/lib/noir-build-tools" \
+  "/usr/local/lib/noir-build-tools"; do
+  if [[ -n "$candidate" && -f "$candidate/utils.sh" ]]; then
+    LIB_DIR="$candidate"
+    break
+  fi
+done
+
+if [[ -z "$LIB_DIR" ]]; then
+  echo "lib/utils.sh not found; set NOIR_BUILD_TOOLS_LIB" >&2
+  exit 1
+fi
+
+source "$LIB_DIR/utils.sh"
+source "$LIB_DIR/config.sh"
+source "$LIB_DIR/nargo.sh"
+
+usage() {
+  cat << EOF
+Usage: noir-compile [OPTIONS] [CIRCUIT]
+
+Options:
+  -a, --all  Compile all circuits
+  -h, --help Show this help
+EOF
+}
+
+COMPILE_ALL=false
+CIRCUIT_NAME=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -a|--all) COMPILE_ALL=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    -*) die "Unknown option: $1" ;;
+    *) CIRCUIT_NAME="$1"; shift ;;
+  esac
+done
+
+load_config
+
+if [[ "$COMPILE_ALL" == "true" ]]; then
+  circuits=$(get_circuit_names)
+elif [[ -n "$CIRCUIT_NAME" ]]; then
+  circuits="$CIRCUIT_NAME"
+else
+  usage; exit 1
+fi
+
+exit_code=0
+for name in $circuits; do
+  circuit_path=$(get_circuit_field "$name" "path")
+  display_name=$(get_circuit_field "$name" "displayName" "$name")
+
+  log_info "Compiling $display_name..."
+
+  if nargo_compile "$circuit_path"; then
+    log_success "Compiled $display_name"
+  else
+    log_error "Failed to compile $display_name"
+    exit_code=1
+  fi
+done
+
+exit $exit_code

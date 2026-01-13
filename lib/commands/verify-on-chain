@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_PATH="$(readlink -f "$0")"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../.." 2>/dev/null && pwd)"
+
+LIB_DIR=""
+for candidate in \
+  "$ROOT_DIR/lib" \
+  "$SCRIPT_DIR/../lib" \
+  "${NOIR_BUILD_TOOLS_LIB:-}" \
+  "$HOME/.local/lib/noir-build-tools" \
+  "/usr/local/lib/noir-build-tools"; do
+  if [[ -n "$candidate" && -f "$candidate/utils.sh" ]]; then
+    LIB_DIR="$candidate"
+    break
+  fi
+done
+
+if [[ -z "$LIB_DIR" ]]; then
+  echo "lib/utils.sh not found; set NOIR_BUILD_TOOLS_LIB" >&2
+  exit 1
+fi
+
+source "$LIB_DIR/utils.sh"
+source "$LIB_DIR/config.sh"
+source "$LIB_DIR/nargo.sh"
+
+usage() {
+  cat << EOF
+Usage: nbt verify-on-chain [OPTIONS] CIRCUIT
+
+Generate a proof and verify it on-chain against the deployed verifier.
+
+Options:
+  --rpc-url URL        RPC URL (default: http://127.0.0.1:8545)
+  --private-key KEY    Private key for transaction (default: anvil default)
+  --chain-id ID        Chain ID (optional; auto-detected if not retrieved from deployment)
+  --json               Output JSON result
+  --help               Show this help
+
+Environment fallbacks:
+  RPC_URL, PRIVATE_KEY, CHAIN_ID
+EOF
+}
+
+CIRCUIT_NAME=""
+RPC_URL="${RPC_URL:-http://127.0.0.1:8545}"
+PRIVATE_KEY="${PRIVATE_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
+CHAIN_ID="${CHAIN_ID:-${CHAINID:-}}"
+OUTPUT_JSON="false"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --rpc-url) RPC_URL="$2"; shift 2 ;;
+    --private-key) PRIVATE_KEY="$2"; shift 2 ;;
+    --chain-id) CHAIN_ID="$2"; shift 2 ;;
+    --json) OUTPUT_JSON="true"; shift 1 ;;
+    --help|-h) usage; exit 0 ;;
+    -*) die "Unknown option: $1" ;;
+    *) CIRCUIT_NAME="$1"; shift ;;
+  esac
+done
+
+[[ -n "$CIRCUIT_NAME" ]] || { usage; exit 1; }
+
+load_config
+backend_path=$(get_backend_path)
+require_cmd "$backend_path"
+require_cmd cast
+
+circuit_path=$(get_circuit_field "$CIRCUIT_NAME" "path")
+verifier_root="$(get_config_path 'verifiers' './contracts/verifiers')"
+
+# 1. Compile & Generate Witness
+log_info "Compiling and generating witness for $CIRCUIT_NAME..."
+nargo_compile "$circuit_path"
+nargo_execute "$circuit_path"
+
+target_dir="$circuit_path/target"
+# Find witness file (nargo might name it witness.gz or circuit_name.gz), avoiding our own artifacts
+witness_path=$(find "$target_dir" -maxdepth 1 -name "*.gz" ! -name "bytecode.gz" | head -n 1)
+[[ -n "$witness_path" ]] || die "Witness file not found in $target_dir"
+witness_abs_path="$(readlink -f "$witness_path")"
+
+# bb 3.x expects gzip-compressed witness directly
+witness_file="$witness_abs_path"
+
+log_info "Tool versions:"
+nargo --version || true
+"$backend_path" --version || true
+
+# Use the standard JSON artifact (works for write_vk, should work for prove)
+artifact_path="$target_dir/${CIRCUIT_NAME}.json"
+[[ -f "$artifact_path" ]] || die "Artifact not found at $artifact_path"
+# Ensure absolute path
+artifact_abs_path="$(readlink -f "$artifact_path")"
+
+# 2. Generate Proof
+log_info "Generating proof..."
+# Use target_dir as output
+# Use absolute paths for inputs to allow running from circuit_path
+# Use --oracle_hash keccak for Solidity compatibility
+cmd=( "$backend_path" prove -b "$artifact_abs_path" -w "$witness_file" -o "target" --oracle_hash keccak )
+log_info "Running: ${cmd[*]}"
+if ! (cd "$circuit_path" && "${cmd[@]}"); then
+  log_error "Proof generation failed!"
+  log_error "This assertion error often indicates a version mismatch between 'nargo' and 'bb'."
+  log_error "Ensure your noir-lang/noir and aztec-packages/barretenberg versions are compatible."
+  exit 1
+fi
+
+proof_path="$target_dir/proof"
+if [[ ! -f "$proof_path" ]]; then
+    # Fallback: maybe it didn't write 'proof'? Check directory content?
+    # Or bb wrote to 'target/proof_binary'?
+    die "Proof file not generated at $proof_path"
+fi
+
+# 3. Find Deployment
+deploy_meta=""
+# Try specific chain ID first
+if [[ -n "$CHAIN_ID" && -f "$verifier_root/$CIRCUIT_NAME/deployment-$CHAIN_ID.json" ]]; then
+  deploy_meta="$verifier_root/$CIRCUIT_NAME/deployment-$CHAIN_ID.json"
+elif [[ -f "$verifier_root/$CIRCUIT_NAME/deployment.json" ]]; then
+  deploy_meta="$verifier_root/$CIRCUIT_NAME/deployment.json"
+else
+  # Try to find any deployment file (deployment-*.json)
+  deploy_meta=$(find "$verifier_root/$CIRCUIT_NAME" -maxdepth 1 -name "deployment-*.json" 2>/dev/null | head -n 1)
+fi
+
+[[ -f "$deploy_meta" ]] || die "Deployment not found. Run 'nbt deploy $CIRCUIT_NAME' first."
+
+verifier_address=$(jq -r '.address' "$deploy_meta")
+deploy_chain_id=$(jq -r '.chainId' "$deploy_meta")
+
+log_info "Found verifier at $verifier_address (Chain ID: $deploy_chain_id)"
+
+# 4. Prepare Args
+# Proof is binary - convert to hex string
+proof_hex="0x$(cat "$proof_path" | od -An -v -t x1 | tr -d ' \n')"
+
+# Public inputs file - convert each 32-byte field to bytes32
+public_inputs_path="$target_dir/public_inputs"
+public_inputs_hex="[]"
+if [[ -f "$public_inputs_path" ]]; then
+  # Each field is 32 bytes. Convert to array of bytes32
+  # Read binary file, convert to hex, split into 64-char chunks (32 bytes each)
+  raw_hex=$(cat "$public_inputs_path" | od -An -v -t x1 | tr -d ' \n')
+  if [[ -n "$raw_hex" ]]; then
+    # Split into 64-char (32-byte) chunks and format as bytes32 array
+    inputs=()
+    while [[ ${#raw_hex} -ge 64 ]]; do
+      inputs+=("0x${raw_hex:0:64}")
+      raw_hex="${raw_hex:64}"
+    done
+    if [[ ${#inputs[@]} -gt 0 ]]; then
+      public_inputs_hex="[$(IFS=,; echo "${inputs[*]}")]"
+    fi
+  fi
+fi
+
+log_info "Verifying on chain..."
+log_info "Proof length: ${#proof_hex} chars"
+log_info "Public inputs: $public_inputs_hex"
+
+# Use cast call first to test (no gas cost)
+if cast call \
+  --rpc-url "$RPC_URL" \
+  "$verifier_address" \
+  "verify(bytes,bytes32[])(bool)" \
+  "$proof_hex" \
+  "$public_inputs_hex"; then
+  log_success "Proof verified successfully on-chain!"
+else
+  log_error "Proof verification failed on-chain"
+  exit 1
+fi

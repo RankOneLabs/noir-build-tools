@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_PATH="$(readlink -f "$0")"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../.." 2>/dev/null && pwd)"
+
+LIB_DIR=""
+for candidate in \
+  "$ROOT_DIR/lib" \
+  "$SCRIPT_DIR/../lib" \
+  "${NOIR_BUILD_TOOLS_LIB:-}" \
+  "$HOME/.local/lib/noir-build-tools" \
+  "/usr/local/lib/noir-build-tools"; do
+  if [[ -n "$candidate" && -f "$candidate/utils.sh" ]]; then
+    LIB_DIR="$candidate"
+    break
+  fi
+done
+
+if [[ -z "$LIB_DIR" ]]; then
+  echo "lib/utils.sh not found; set NOIR_BUILD_TOOLS_LIB" >&2
+  exit 1
+fi
+
+source "$LIB_DIR/utils.sh"
+
+log_info "Running Noir Build Tools Doctor..."
+echo ""
+
+errors=0
+
+check_cmd() {
+    local cmd="$1"
+    local help="$2"
+    if command -v "$cmd" &>/dev/null; then
+        local version=""
+        if [[ "$cmd" == "nargo" ]]; then
+            version=$(nargo --version | head -n 1)
+        elif [[ "$cmd" == "jq" ]]; then
+            version=$(jq --version)
+        elif [[ "$cmd" == "bb" ]]; then
+            version=$(bb --version 2>/dev/null || echo "detected")
+        fi
+        log_success "Found $cmd ${version:+(v$version)}"
+    else
+        log_error "Missing $cmd: $help"
+        ((errors++))
+    fi
+}
+
+check_cmd "jq" "Install jq (https://stedolan.github.io/jq/)"
+check_cmd "nargo" "Install Nargo (https://noir-lang.org/getting_started/install)"
+
+# Optional specific checks
+if [[ "${1:-}" == "--full" ]]; then
+    check_cmd "bb" "Install Barretenberg (bb) for verifier generation (optional)"
+    check_cmd "git" "Install git"
+fi
+
+# Check nargo/bb version compatibility
+check_version_compat() {
+    local nargo_ver="" bb_ver=""
+    
+    if command -v nargo &>/dev/null; then
+        nargo_ver=$(nargo --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?' | head -1 || true)
+    fi
+    if command -v bb &>/dev/null; then
+        bb_ver=$(bb --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+    fi
+    
+    if [[ -z "$nargo_ver" || -z "$bb_ver" ]]; then
+        return  # Can't check if versions not detected
+    fi
+    
+    echo ""
+    log_info "Checking nargo/bb version compatibility..."
+    echo "  nargo: $nargo_ver"
+    echo "  bb:    $bb_ver"
+    
+    # Known compatible pairs (approximate; update as needed)
+    # nargo 1.0.0-beta.X requires bb 3.x nightly (e.g., 3.0.0-nightly.20251104)
+    # nargo 0.38.x works with bb 0.62.x
+    # nargo 0.36.x works with bb 0.58.x
+    
+    local nargo_major nargo_minor bb_major bb_minor
+    nargo_major=$(echo "$nargo_ver" | cut -d. -f1)
+    nargo_minor=$(echo "$nargo_ver" | cut -d. -f2)
+    bb_major=$(echo "$bb_ver" | cut -d. -f1)
+    bb_minor=$(echo "$bb_ver" | cut -d. -f2)
+    
+    local compat_issue=""
+    
+    # nargo 1.x (beta) requires bb 3.x nightly
+    if [[ "$nargo_major" -ge 1 ]]; then
+        if [[ "$bb_major" -lt 3 ]]; then
+            compat_issue="nargo $nargo_ver requires bb 3.x (e.g., bbup --version 3.0.0-nightly.20251104). You have bb $bb_ver."
+        fi
+    # nargo 0.38.x-0.40.x works with bb 0.62.x-0.65.x
+    elif [[ "$nargo_minor" -ge 38 && "$nargo_minor" -le 40 ]]; then
+        if [[ "$bb_minor" -lt 60 || "$bb_minor" -gt 68 ]]; then
+            compat_issue="nargo $nargo_ver typically works with bb 0.60.x-0.68.x. You have bb $bb_ver."
+        fi
+    # nargo 0.36.x-0.37.x works with bb 0.58.x-0.60.x
+    elif [[ "$nargo_minor" -ge 36 && "$nargo_minor" -le 37 ]]; then
+        if [[ "$bb_minor" -lt 56 || "$bb_minor" -gt 62 ]]; then
+            compat_issue="nargo $nargo_ver typically works with bb 0.56.x-0.62.x. You have bb $bb_ver."
+        fi
+    fi
+    
+    if [[ -n "$compat_issue" ]]; then
+        log_warn "Possible version mismatch: $compat_issue"
+        log_warn "If you see 'Length is too large' errors during proving, upgrade bb or align versions."
+        ((errors++))
+    else
+        log_success "nargo/bb versions appear compatible"
+    fi
+}
+
+check_version_compat
+
+echo ""
+if [[ $errors -eq 0 ]]; then
+    log_success "Environment looks good!"
+else
+    log_error "Found $errors issue(s). Please resolve them before proceeding."
+    exit 1
+fi

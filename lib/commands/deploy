@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_PATH="$(readlink -f "$0")"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../.." 2>/dev/null && pwd)"
+
+LIB_DIR=""
+for candidate in \
+  "$ROOT_DIR/lib" \
+  "$SCRIPT_DIR/../lib" \
+  "${NOIR_BUILD_TOOLS_LIB:-}" \
+  "$HOME/.local/lib/noir-build-tools" \
+  "/usr/local/lib/noir-build-tools"; do
+  if [[ -n "$candidate" && -f "$candidate/utils.sh" ]]; then
+    LIB_DIR="$candidate"
+    break
+  fi
+done
+
+if [[ -z "$LIB_DIR" ]]; then
+  echo "lib/utils.sh not found; set NOIR_BUILD_TOOLS_LIB" >&2
+  exit 1
+fi
+
+source "$LIB_DIR/utils.sh"
+source "$LIB_DIR/config.sh"
+
+usage() {
+  cat << EOF
+Usage: nbt deploy [OPTIONS] CIRCUIT
+
+Deploy a generated verifier contract with Foundry (forge create).
+
+Options:
+  --rpc-url URL        RPC URL (default: http://127.0.0.1:8545)
+  --private-key KEY    Private key for deployment (default: anvil default key[0])
+  --contract-name NAME Contract name (default: HonkVerifier)
+  --chain-id ID        Chain ID (optional; auto-detected via cast if not set)
+  --dry-run            Do not broadcast (omit --broadcast)
+  --legacy             Use legacy transactions (for some testnets)
+  --optimizer-runs N   Set optimizer runs (default: 200)
+  --no-optimize        Disable optimization (default: enabled)
+  --help               Show this help
+
+Environment fallbacks:
+  RPC_URL, PRIVATE_KEY, CONTRACT_NAME, CHAIN_ID or CHAINID
+
+Requires: forge
+EOF
+}
+
+CIRCUIT_NAME=""
+RPC_URL="${RPC_URL:-http://127.0.0.1:8545}"
+PRIVATE_KEY="${PRIVATE_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
+CONTRACT_NAME="${CONTRACT_NAME:-HonkVerifier}"
+CHAIN_ID="${CHAIN_ID:-${CHAINID:-}}"
+DRY_RUN="${DRY_RUN:-false}"
+
+OPTIMIZER_RUNS="${OPTIMIZER_RUNS:-200}"
+ENABLE_OPTIMIZER="${ENABLE_OPTIMIZER:-true}"
+USE_VIA_IR="${USE_VIA_IR:-false}"
+USE_LEGACY="${USE_LEGACY:-false}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --rpc-url) RPC_URL="$2"; shift 2 ;;
+    --private-key) PRIVATE_KEY="$2"; shift 2 ;;
+    --contract-name) CONTRACT_NAME="$2"; shift 2 ;;
+    --chain-id) CHAIN_ID="$2"; shift 2 ;;
+    --dry-run) DRY_RUN="true"; shift 1 ;;
+    --optimizer-runs) OPTIMIZER_RUNS="$2"; shift 2 ;;
+    --no-optimize) ENABLE_OPTIMIZER="false"; shift 1 ;;
+    --no-via-ir) USE_VIA_IR="false"; shift 1 ;;
+    --legacy) USE_LEGACY="true"; shift 1 ;;
+    --help|-h) usage; exit 0 ;;
+    -*) die "Unknown option: $1" ;;
+    *) CIRCUIT_NAME="$1"; shift ;;
+  esac
+done
+
+# Build common forge flags
+FORGE_FLAGS=(
+  "--rpc-url" "$RPC_URL"
+  "--private-key" "$PRIVATE_KEY"
+)
+
+[[ "$DRY_RUN" == "false" ]] && FORGE_FLAGS+=("--broadcast")
+[[ "$USE_LEGACY" == "true" ]] && FORGE_FLAGS+=("--legacy")
+if [[ "$ENABLE_OPTIMIZER" == "true" ]]; then
+  FORGE_FLAGS+=("--optimize" "--optimizer-runs" "$OPTIMIZER_RUNS")
+fi
+if [[ "$USE_VIA_IR" == "true" ]]; then
+  FORGE_FLAGS+=("--via-ir")
+fi
+
+[[ -n "$CIRCUIT_NAME" ]] || { usage; exit 1; }
+
+load_config
+require_cmd forge
+[[ -n "$CHAIN_ID" ]] || command -v cast >/dev/null 2>&1 || die "Set CHAIN_ID or install Foundry 'cast' to auto-detect chain id"
+
+if [[ -z "$CHAIN_ID" ]]; then
+  CHAIN_ID=$(cast chain-id --rpc-url "$RPC_URL" 2>/dev/null || true)
+fi
+[[ -n "$CHAIN_ID" ]] || CHAIN_ID="unknown"
+
+verifier_root="$(get_config_path 'verifiers' './contracts/verifiers')"
+contract_path="$verifier_root/$CIRCUIT_NAME/Verifier.sol"
+
+[[ -f "$contract_path" ]] || die "Verifier contract not found: $contract_path (run 'nbt verifier $CIRCUIT_NAME')"
+
+log_info "Deploying $contract_path as $CONTRACT_NAME to $RPC_URL..."
+
+# Detect libraries in the verifier source so we can deploy/link automatically
+mapfile -t LIB_NAMES < <(grep -E '^[[:space:]]*library[[:space:]]+[A-Za-z0-9_]+' "$contract_path" | \
+  sed -E 's/^[[:space:]]*library[[:space:]]+([A-Za-z0-9_]+).*/\1/' | sort -u)
+
+libs_arg=""
+libs_json="{}"
+
+if [[ ${#LIB_NAMES[@]} -gt 0 ]]; then
+  declare -A LIB_ADDRS
+  declare -a LINK_PARTS
+  for lib in "${LIB_NAMES[@]}"; do
+    log_info "Deploying library $lib..."
+    lib_output=$(forge create \
+      "${FORGE_FLAGS[@]}" \
+      "$contract_path":"$lib")
+
+    echo "$lib_output"
+    lib_address=$(echo "$lib_output" | grep -i "Deployed to" | awk '{print $3}' | tail -1)
+    [[ -n "$lib_address" ]] || die "Failed to parse address for library $lib"
+
+    LIB_ADDRS[$lib]="$lib_address"
+    LINK_PARTS+=("$contract_path:$lib:$lib_address")
+  done
+
+  # Build library arguments using array to handle quoting/spaces safely
+  declare -a LIB_ARGS
+  for part in "${LINK_PARTS[@]}"; do
+    LIB_ARGS+=( "--libraries" "$part" )
+  done
+
+  # Build JSON object for libraries
+  first=true
+  libs_json="{"
+  for lib in "${!LIB_ADDRS[@]}"; do
+    if [[ "$first" = true ]]; then
+      first=false
+    else
+      libs_json+=","
+    fi
+    libs_json+="\"$lib\":\"${LIB_ADDRS[$lib]}\""
+  done
+  libs_json+="}"
+fi
+
+deploy_output=$(forge create \
+  "${FORGE_FLAGS[@]}" \
+  "${LIB_ARGS[@]}" \
+  "$contract_path":"$CONTRACT_NAME")
+
+echo "$deploy_output"
+
+deployed_address=$(echo "$deploy_output" | grep -i "Deployed to" | awk '{print $3}' | tail -1)
+tx_hash=$(echo "$deploy_output" | grep -i "Transaction hash" | awk '{print $3}' | tail -1)
+
+if [[ -n "$deployed_address" ]]; then
+  if [[ "$CHAIN_ID" == "unknown" ]]; then
+    deploy_meta_path="$verifier_root/$CIRCUIT_NAME/deployment.json"
+  else
+    deploy_meta_path="$verifier_root/$CIRCUIT_NAME/deployment-$CHAIN_ID.json"
+  fi
+  cat > "$deploy_meta_path" <<EOF
+{
+  "circuit": "$CIRCUIT_NAME",
+  "contractName": "$CONTRACT_NAME",
+  "address": "$deployed_address",
+  "txHash": "$tx_hash",
+  "rpcUrl": "$RPC_URL",
+  "chainId": "$CHAIN_ID",
+  "libraries": $libs_json
+}
+EOF
+  log_success "Deployed to $deployed_address (tx: $tx_hash). Saved to $deploy_meta_path"
+else
+  log_warn "Could not parse deployed address from forge output. Please capture manually."
+fi

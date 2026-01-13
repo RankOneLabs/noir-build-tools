@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_PATH="$(readlink -f "$0")"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../.." 2>/dev/null && pwd)"
+
+LIB_DIR=""
+for candidate in \
+  "$ROOT_DIR/lib" \
+  "$SCRIPT_DIR/../lib" \
+  "${NOIR_BUILD_TOOLS_LIB:-}" \
+  "$HOME/.local/lib/noir-build-tools" \
+  "/usr/local/lib/noir-build-tools"; do
+  if [[ -n "$candidate" && -f "$candidate/utils.sh" ]]; then
+    LIB_DIR="$candidate"
+    break
+  fi
+done
+
+if [[ -z "$LIB_DIR" ]]; then
+  echo "lib/utils.sh not found; set NOIR_BUILD_TOOLS_LIB" >&2
+  exit 1
+fi
+
+source "$LIB_DIR/utils.sh"
+source "$LIB_DIR/config.sh"
+source "$LIB_DIR/nargo.sh"
+source "$LIB_DIR/format.sh"
+
+usage() {
+  cat << EOF
+Usage: noir-profile [OPTIONS] [CIRCUIT]
+
+Profile circuit constraints and check budgets.
+
+Options:
+  -a, --all      Profile all circuits
+  --json         Output as JSON
+  -h, --help     Show this help
+
+Exit Codes:
+  0  All circuits within budget
+  1  One or more circuits exceed budget
+EOF
+}
+
+PROFILE_ALL=false
+CIRCUIT_NAME=""
+OUTPUT_JSON=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -a|--all) PROFILE_ALL=true; shift ;;
+    --json) OUTPUT_JSON=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    -*) die "Unknown option: $1" ;;
+    *) CIRCUIT_NAME="$1"; shift ;;
+  esac
+done
+
+load_config
+
+if [[ "$PROFILE_ALL" == "true" ]]; then
+  circuits=$(get_circuit_names)
+elif [[ -n "$CIRCUIT_NAME" ]]; then
+  circuits="$CIRCUIT_NAME"
+else
+  usage; exit 1
+fi
+
+declare -a results=()
+over_budget_count=0
+
+for name in $circuits; do
+  circuit_path=$(get_circuit_field "$name" "path")
+  display_name=$(get_circuit_field "$name" "displayName" "$name")
+  budget=$(get_circuit_field "$name" "constraintBudget" "0")
+
+  [[ "$OUTPUT_JSON" != "true" ]] && log_info "Profiling $display_name..."
+
+  nargo_compile "$circuit_path" &>/dev/null || die "Failed to compile $name"
+
+  info=$(nargo_info "$circuit_path")
+  acir=$(echo "$info" | jq -r '.acir')
+  brillig=$(echo "$info" | jq -r '.brillig')
+  total=$((acir + brillig))
+
+  within_budget="true"
+  if [[ "$budget" -gt 0 ]] && [[ "$total" -gt "$budget" ]]; then
+    within_budget="false"
+    ((over_budget_count++))
+  fi
+
+  results+=("{\"name\":\"$name\",\"acir\":$acir,\"brillig\":$brillig,\"total\":$total,\"budget\":$budget,\"withinBudget\":$within_budget}")
+done
+
+if [[ "$OUTPUT_JSON" == "true" ]]; then
+  echo "["
+  for i in "${!results[@]}"; do
+    [[ $i -gt 0 ]] && echo ","
+    echo "  ${results[$i]}"
+  done
+  echo "]"
+else
+  echo ""
+  print_profile_header
+
+  for result in "${results[@]}"; do
+    name=$(echo "$result" | jq -r '.name')
+    acir=$(echo "$result" | jq -r '.acir')
+    brillig=$(echo "$result" | jq -r '.brillig')
+    total=$(echo "$result" | jq -r '.total')
+    within=$(echo "$result" | jq -r '.withinBudget')
+    status=$(format_status "$within")
+
+    printf "| %-20s | %12s | %12s | %12s | %10s |\n" \
+      "$name" "$(format_number "$acir")" "$(format_number "$brillig")" "$(format_number "$total")" "$status"
+  done
+
+  print_separator
+  echo ""
+
+  if [[ $over_budget_count -gt 0 ]]; then
+    log_error "$over_budget_count circuit(s) exceeded constraint budget"
+  else
+    log_success "All circuits within budget"
+  fi
+fi
+
+[[ $over_budget_count -eq 0 ]]

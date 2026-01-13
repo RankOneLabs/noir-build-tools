@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_PATH="$(readlink -f "$0")"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../.." 2>/dev/null && pwd)"
+
+LIB_DIR=""
+for candidate in \
+  "$ROOT_DIR/lib" \
+  "$SCRIPT_DIR/../lib" \
+  "${NOIR_BUILD_TOOLS_LIB:-}" \
+  "$HOME/.local/lib/noir-build-tools" \
+  "/usr/local/lib/noir-build-tools"; do
+  if [[ -n "$candidate" && -f "$candidate/utils.sh" ]]; then
+    LIB_DIR="$candidate"
+    break
+  fi
+done
+
+if [[ -z "$LIB_DIR" ]]; then
+  echo "lib/utils.sh not found; set NOIR_BUILD_TOOLS_LIB" >&2
+  exit 1
+fi
+
+source "$LIB_DIR/utils.sh"
+source "$LIB_DIR/config.sh"
+source "$LIB_DIR/nargo.sh"
+
+usage() {
+  cat << EOF
+Usage: noir-benchmark [OPTIONS] [CIRCUIT]
+
+Options:
+  -a, --all      Benchmark all circuits
+  -n, --runs N   Number of runs (default: from config or 5)
+  --json         Output as JSON
+  --csv          Output as CSV
+  -h, --help     Show this help
+EOF
+}
+
+BENCH_ALL=false
+CIRCUIT_NAME=""
+NUM_RUNS=""
+OUTPUT_JSON=false
+OUTPUT_CSV=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -a|--all) BENCH_ALL=true; shift ;;
+    -n|--runs) NUM_RUNS="$2"; shift 2 ;;
+    --json) OUTPUT_JSON=true; shift ;;
+    --csv) OUTPUT_CSV=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    -*) die "Unknown option: $1" ;;
+    *) CIRCUIT_NAME="$1"; shift ;;
+  esac
+done
+
+load_config
+
+if [[ "$BENCH_ALL" == "true" ]]; then
+  circuits=$(get_circuit_names)
+elif [[ -n "$CIRCUIT_NAME" ]]; then
+  circuits="$CIRCUIT_NAME"
+else
+  usage; exit 1
+fi
+
+time_ms() {
+  local start end
+  start=$(date +%s%3N)
+  "$@" &>/dev/null
+  end=$(date +%s%3N)
+  echo $((end - start))
+}
+
+calc_avg() {
+  local -n vals=$1
+  local sum=0
+  for v in "${vals[@]}"; do sum=$((sum + v)); done
+  echo $((sum / ${#vals[@]}))
+}
+
+declare -a results=()
+
+for name in $circuits; do
+  circuit_path=$(get_circuit_field "$name" "path")
+  runs=${NUM_RUNS:-$(get_circuit_field "$name" "benchmarkRuns" "5")}
+
+  [[ "$OUTPUT_JSON" != "true" && "$OUTPUT_CSV" != "true" ]] && \
+    log_info "Benchmarking $name ($runs runs)..."
+
+  nargo_compile "$circuit_path" &>/dev/null
+  info=$(nargo_info "$circuit_path")
+  acir=$(echo "$info" | jq -r '.acir')
+  brillig=$(echo "$info" | jq -r '.brillig')
+
+  # Warmup
+  nargo_compile "$circuit_path" &>/dev/null
+
+  declare -a compile_times=()
+  declare -a prove_times=()
+
+  for ((i=1; i<=runs; i++)); do
+    compile_times+=("$(time_ms nargo_compile "$circuit_path")")
+    if [[ -f "$circuit_path/Prover.toml" ]]; then
+      prove_times+=("$(time_ms run_nargo "$circuit_path" prove)")
+    fi
+  done
+
+  compile_avg=$(calc_avg compile_times)
+  prove_avg=0
+  [[ ${#prove_times[@]} -gt 0 ]] && prove_avg=$(calc_avg prove_times)
+
+  results+=("{\"name\":\"$name\",\"acir\":$acir,\"brillig\":$brillig,\"compileAvg\":$compile_avg,\"proveAvg\":$prove_avg,\"runs\":$runs}")
+  unset compile_times prove_times
+done
+
+if [[ "$OUTPUT_JSON" == "true" ]]; then
+  echo "["; for i in "${!results[@]}"; do [[ $i -gt 0 ]] && echo ","; echo "  ${results[$i]}"; done; echo "]"
+elif [[ "$OUTPUT_CSV" == "true" ]]; then
+  echo "circuit,acir,brillig,compile_ms,prove_ms,runs"
+  for r in "${results[@]}"; do echo "$r" | jq -r '[.name,.acir,.brillig,.compileAvg,.proveAvg,.runs] | @csv'; done
+else
+  echo -e "\n${BOLD}Benchmark Results${NC}\n"
+  printf "| %-20s | %12s | %12s | %12s | %12s |\n" "Circuit" "ACIR" "Brillig" "Compile" "Prove"
+  echo "+----------------------+--------------+--------------+--------------+--------------+"
+  for r in "${results[@]}"; do
+    printf "| %-20s | %12s | %12s | %10s ms | %10s ms |\n" \
+      "$(echo "$r"|jq -r '.name')" "$(echo "$r"|jq -r '.acir')" "$(echo "$r"|jq -r '.brillig')" \
+      "$(echo "$r"|jq -r '.compileAvg')" "$(echo "$r"|jq -r '.proveAvg')"
+  done
+  echo "+----------------------+--------------+--------------+--------------+--------------+"
+fi

@@ -1,0 +1,20 @@
+{
+  "version": "1.0.0",
+  "circuits": [
+    {
+      "name": "example",
+      "displayName": "Example Circuit",
+      "path": "circuits/example",
+      "description": "An example circuit",
+      "constraintBudget": 100000,
+      "benchmarkRuns": 5
+    }
+  ],
+  "paths": {
+    "reports": "./reports",
+    "verifiers": "./contracts/verifiers"
+  },
+  "backend": {
+    "path": "bb"
+  }
+}

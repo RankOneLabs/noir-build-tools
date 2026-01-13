@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_PATH="$(readlink -f "$0")"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../.." 2>/dev/null && pwd)"
+
+LIB_DIR=""
+for candidate in \
+  "$ROOT_DIR/lib" \
+  "$SCRIPT_DIR/../lib" \
+  "${NOIR_BUILD_TOOLS_LIB:-}" \
+  "$HOME/.local/lib/noir-build-tools" \
+  "/usr/local/lib/noir-build-tools"; do
+  if [[ -n "$candidate" && -f "$candidate/utils.sh" ]]; then
+    LIB_DIR="$candidate"
+    break
+  fi
+done
+
+if [[ -z "$LIB_DIR" ]]; then
+  echo "lib/utils.sh not found; set NOIR_BUILD_TOOLS_LIB" >&2
+  exit 1
+fi
+
+source "$LIB_DIR/utils.sh"
+source "$LIB_DIR/config.sh"
+source "$LIB_DIR/nargo.sh"
+
+usage() {
+  cat << EOF
+Usage: noir-report [CIRCUIT]
+
+Generates a simple JSON report with constraint counts and budgets.
+If no circuit provided, reports on all circuits.
+EOF
+}
+
+CIRCUIT_NAME=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    -*) die "Unknown option: $1" ;;
+    *) CIRCUIT_NAME="$1"; shift ;;
+  esac
+done
+
+load_config
+
+if [[ -n "$CIRCUIT_NAME" ]]; then
+  circuits="$CIRCUIT_NAME"
+else
+  circuits=$(get_circuit_names)
+fi
+
+declare -a results=()
+
+for name in $circuits; do
+  circuit_path=$(get_circuit_field "$name" "path")
+  budget=$(get_circuit_field "$name" "constraintBudget" "0")
+
+  nargo_compile "$circuit_path" &>/dev/null || die "Failed to compile $name"
+  info=$(nargo_info "$circuit_path")
+  acir=$(echo "$info" | jq -r '.acir')
+  brillig=$(echo "$info" | jq -r '.brillig')
+  total=$((acir + brillig))
+
+  within="true"
+  if [[ "$budget" -gt 0 ]] && [[ "$total" -gt "$budget" ]]; then
+    within="false"
+  fi
+
+  results+=("{\"name\":\"$name\",\"acir\":$acir,\"brillig\":$brillig,\"total\":$total,\"budget\":$budget,\"withinBudget\":$within}")
+done
+
+if [[ ${#results[@]} -eq 1 ]]; then
+  echo "${results[0]}" | jq '.'
+else
+  echo "["; for i in "${!results[@]}"; do [[ $i -gt 0 ]] && echo ","; echo "  ${results[$i]}"; done; echo "]" | jq '.'
+fi

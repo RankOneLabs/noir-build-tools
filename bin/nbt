@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_PATH="$(readlink -f "$0")"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." 2>/dev/null && pwd)"
+
+# Resolve Library Directory
+LIB_DIR=""
+for candidate in \
+  "$ROOT_DIR/lib" \
+  "$SCRIPT_DIR/../lib" \
+  "${NOIR_BUILD_TOOLS_LIB:-}" \
+  "$HOME/.local/lib/noir-build-tools" \
+  "/usr/local/lib/noir-build-tools"; do
+  if [[ -n "$candidate" && -f "$candidate/utils.sh" ]]; then
+    LIB_DIR="$candidate"
+    break
+  fi
+done
+
+if [[ -z "$LIB_DIR" ]]; then
+  echo "lib/utils.sh not found; set NOIR_BUILD_TOOLS_LIB" >&2
+  exit 1
+fi
+
+source "$LIB_DIR/utils.sh"
+
+usage() {
+  cat << EOF
+Noir Build Tools (NBT)
+
+Usage: nbt <command> [options]
+
+Commands:
+  compile     Compile circuits
+  test        Run tests
+  profile     Profile constraints and check budgets
+  benchmark   Benchmark execution performance
+  verifier    Generate Solidity verifier
+  deploy      Deploy Solidity verifier (forge create)
+  list        List configured circuits
+  report      Generate JSON summary report
+  init        Initialize configuration
+  doctor      Check environment health
+
+EOF
+  exit 1
+}
+
+if [[ $# -eq 0 ]]; then
+  usage
+fi
+
+COMMAND="$1"
+shift
+
+COMMAND_PATH="$LIB_DIR/commands/$COMMAND"
+
+if [[ -f "$COMMAND_PATH" && -x "$COMMAND_PATH" ]]; then
+  exec "$COMMAND_PATH" "$@"
+else
+  log_error "Unknown command: $COMMAND"
+  usage
+fi
