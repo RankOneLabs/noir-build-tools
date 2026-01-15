@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_PATH="$(readlink -f "$0")"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../.." 2>/dev/null && pwd)"
+
+LIB_DIR=""
+for candidate in \
+  "$ROOT_DIR/lib" \
+  "$SCRIPT_DIR/../lib" \
+  "${NOIR_BUILD_TOOLS_LIB:-}" \
+  "$HOME/.local/lib/noir-build-tools" \
+  "/usr/local/lib/noir-build-tools"; do
+  if [[ -n "$candidate" && -f "$candidate/utils.sh" ]]; then
+    LIB_DIR="$candidate"
+    break
+  fi
+done
+
+if [[ -z "$LIB_DIR" ]]; then
+  echo "lib/utils.sh not found; set NOIR_BUILD_TOOLS_LIB" >&2
+  exit 1
+fi
+
+source "$LIB_DIR/utils.sh"
+source "$LIB_DIR/config.sh"
+source "$LIB_DIR/nargo.sh"
+
+usage() {
+  cat << EOF
+Usage: nbt prove [OPTIONS] CIRCUIT
+
+Generate a proof for a circuit using bb (Barretenberg).
+
+Options:
+  -i, --inputs FILE    Path to Prover.toml inputs (default: Prover.toml in circuit dir)
+  -o, --output FILE    Output proof file (default: target/proof)
+  --json               Output JSON result with proof path
+  -h, --help           Show this help
+
+Examples:
+  nbt prove age_gate                      # Use default Prover.toml
+  nbt prove age_gate -i custom.toml       # Custom inputs file
+  nbt prove age_gate --json               # JSON output for scripting
+
+Requires: nargo, bb (Barretenberg)
+EOF
+}
+
+CIRCUIT_NAME=""
+INPUTS_FILE=""
+OUTPUT_FILE=""
+JSON_OUTPUT=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -i|--inputs) INPUTS_FILE="$2"; shift 2 ;;
+    -o|--output) OUTPUT_FILE="$2"; shift 2 ;;
+    --json) JSON_OUTPUT=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    -*) die "Unknown option: $1" ;;
+    *) CIRCUIT_NAME="$1"; shift ;;
+  esac
+done
+
+[[ -n "$CIRCUIT_NAME" ]] || { usage; exit 1; }
+
+load_config
+
+backend_path=$(get_backend_path)
+require_cmd "$backend_path"
+require_cmd nargo
+
+circuit_path=$(get_circuit_field "$CIRCUIT_NAME" "path")
+
+# Handle inputs file
+inputs_file="${INPUTS_FILE:-$circuit_path/Prover.toml}"
+[[ -f "$inputs_file" ]] || die "Inputs not found: $inputs_file"
+
+# If custom inputs file, copy to circuit Prover.toml temporarily
+# If custom inputs file, copy to circuit Prover.toml temporarily
+if [[ -n "$INPUTS_FILE" && "$INPUTS_FILE" != "$circuit_path/Prover.toml" ]]; then
+  # Define cleanup function to restore backup
+  cleanup_inputs() {
+    # log_info "Cleaning up..."
+    if [[ -f "$circuit_path/Prover.toml.bak" ]]; then
+      # log_info "Restoring backup..."
+      mv "$circuit_path/Prover.toml.bak" "$circuit_path/Prover.toml"
+    elif [[ -f "$circuit_path/Prover.toml" ]]; then
+      # If no backup existed (meaning no original file), remove the temporary one
+      rm -f "$circuit_path/Prover.toml"
+    fi
+  }
+
+  # Register trap to ensure cleanup runs on exit/error
+  trap cleanup_inputs EXIT
+
+  # Backup existing if present
+  if [[ -f "$circuit_path/Prover.toml" ]]; then
+    # log_info "Backing up Prover.toml..."
+    mv "$circuit_path/Prover.toml" "$circuit_path/Prover.toml.bak"
+  fi
+  
+  cp "$INPUTS_FILE" "$circuit_path/Prover.toml"
+fi
+
+output_file="${OUTPUT_FILE:-$circuit_path/target/proof}"
+
+if [[ "$JSON_OUTPUT" != "true" ]]; then
+  log_info "Generating proof for $CIRCUIT_NAME..."
+  log_info "Inputs: $inputs_file"
+fi
+
+# Step 1: Compile the circuit
+nargo_compile "$circuit_path"
+
+artifact="$circuit_path/target/${CIRCUIT_NAME}.json"
+[[ -f "$artifact" ]] || die "Artifact not found: $artifact"
+
+# Step 2: Execute to generate witness
+if [[ "$JSON_OUTPUT" != "true" ]]; then
+  log_info "Generating witness..."
+fi
+(cd "$circuit_path" && nargo execute)
+
+witness_file="$circuit_path/target/${CIRCUIT_NAME}.gz"
+[[ -f "$witness_file" ]] || die "Witness not generated: $witness_file"
+
+# Step 3: Generate VK if not present
+vk_file="$circuit_path/target/vk"
+if [[ ! -f "$vk_file" ]]; then
+  if [[ "$JSON_OUTPUT" != "true" ]]; then
+    log_info "Generating verification key..."
+  fi
+  (cd "$circuit_path" && "$backend_path" write_vk -b "target/${CIRCUIT_NAME}.json" -o "target")
+  [[ -f "$vk_file" ]] || die "VK generation failed"
+fi
+
+# Step 4: Generate proof using bb
+if [[ "$JSON_OUTPUT" != "true" ]]; then
+  log_info "Generating proof..."
+fi
+
+# Get absolute paths for bb
+artifact_abs=$(readlink -f "$artifact")
+witness_abs=$(readlink -f "$witness_file")
+vk_abs=$(readlink -f "$vk_file")
+output_dir_abs=$(mkdir -p "$(dirname "$output_file")" && readlink -f "$(dirname "$output_file")")
+
+"$backend_path" prove -b "$artifact_abs" -w "$witness_abs" -k "$vk_abs" -o "$output_dir_abs"
+
+# bb outputs to $output_dir_abs/proof
+proof_generated="$output_dir_abs/proof"
+if [[ -n "$OUTPUT_FILE" && "$OUTPUT_FILE" != "$proof_generated" ]]; then
+  mv "$proof_generated" "$OUTPUT_FILE"
+  proof_generated="$OUTPUT_FILE"
+fi
+
+if [[ "$JSON_OUTPUT" == "true" ]]; then
+  echo '{"success": true, "circuit": "'"$CIRCUIT_NAME"'", "proof": "'"$proof_generated"'"}'
+else
+  log_success "Proof generated: $proof_generated"
+fi

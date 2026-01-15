@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_PATH="$(readlink -f "$0")"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../.." 2>/dev/null && pwd)"
+
+LIB_DIR=""
+for candidate in \
+  "$ROOT_DIR/lib" \
+  "$SCRIPT_DIR/../lib" \
+  "${NOIR_BUILD_TOOLS_LIB:-}" \
+  "$HOME/.local/lib/noir-build-tools" \
+  "/usr/local/lib/noir-build-tools"; do
+  if [[ -n "$candidate" && -f "$candidate/utils.sh" ]]; then
+    LIB_DIR="$candidate"
+    break
+  fi
+done
+
+if [[ -z "$LIB_DIR" ]]; then
+  echo "lib/utils.sh not found; set NOIR_BUILD_TOOLS_LIB" >&2
+  exit 1
+fi
+
+source "$LIB_DIR/utils.sh"
+source "$LIB_DIR/config.sh"
+source "$LIB_DIR/nargo.sh"
+
+usage() {
+  cat << EOF
+Usage: nbt verify [OPTIONS] CIRCUIT
+
+Verify a proof off-chain using bb (Barretenberg).
+
+Options:
+  -p, --proof FILE     Path to proof file (default: target/proof)
+  -k, --vk FILE        Path to verification key (default: target/vk)
+  -i, --inputs FILE    Path to public inputs file (default: target/public_inputs)
+  --json               Output JSON result
+  -h, --help           Show this help
+
+Examples:
+  nbt verify age_gate                    # Uses default proof/vk/inputs paths
+  nbt verify age_gate -p my_proof.bin    # Custom proof file
+  nbt verify age_gate --json             # JSON output for scripting
+
+Requires: bb (Barretenberg)
+EOF
+}
+
+CIRCUIT_NAME=""
+PROOF_FILE=""
+VK_FILE=""
+PUBLIC_INPUTS_FILE=""
+JSON_OUTPUT=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -p|--proof) PROOF_FILE="$2"; shift 2 ;;
+    -k|--vk) VK_FILE="$2"; shift 2 ;;
+    -i|--inputs) PUBLIC_INPUTS_FILE="$2"; shift 2 ;;
+    --json) JSON_OUTPUT=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    -*) die "Unknown option: $1" ;;
+    *) CIRCUIT_NAME="$1"; shift ;;
+  esac
+done
+
+[[ -n "$CIRCUIT_NAME" ]] || { usage; exit 1; }
+
+load_config
+
+backend_path=$(get_backend_path)
+require_cmd "$backend_path"
+
+circuit_path=$(get_circuit_field "$CIRCUIT_NAME" "path")
+
+# Default paths if not specified
+proof_file="${PROOF_FILE:-$circuit_path/target/proof}"
+vk_file="${VK_FILE:-$circuit_path/target/vk}"
+public_inputs_file="${PUBLIC_INPUTS_FILE:-$circuit_path/target/public_inputs}"
+
+# Validate files exist
+[[ -f "$proof_file" ]] || die "Proof not found: $proof_file (run 'nbt prove $CIRCUIT_NAME' first)"
+[[ -f "$vk_file" ]] || die "Verification key not found: $vk_file (run 'nbt verifier $CIRCUIT_NAME' first)"
+[[ -f "$public_inputs_file" ]] || die "Public inputs not found: $public_inputs_file (run 'nbt prove $CIRCUIT_NAME' first)"
+
+# Get absolute paths for bb
+proof_abs=$(readlink -f "$proof_file")
+vk_abs=$(readlink -f "$vk_file")
+public_inputs_abs=$(readlink -f "$public_inputs_file")
+
+if [[ "$JSON_OUTPUT" == "true" ]]; then
+  # Quiet mode for JSON output
+  if "$backend_path" verify -k "$vk_abs" -p "$proof_abs" -i "$public_inputs_abs" 2>/dev/null; then
+    echo '{"verified": true, "circuit": "'"$CIRCUIT_NAME"'", "proof": "'"$proof_file"'"}'
+    exit 0
+  else
+    echo '{"verified": false, "circuit": "'"$CIRCUIT_NAME"'", "proof": "'"$proof_file"'", "error": "Verification failed"}'
+    exit 1
+  fi
+else
+  log_info "Verifying proof for $CIRCUIT_NAME..."
+  log_info "Proof: $proof_file"
+  log_info "VK: $vk_file"
+  
+  if "$backend_path" verify -k "$vk_abs" -p "$proof_abs" -i "$public_inputs_abs"; then
+    log_success "Proof verified successfully!"
+    exit 0
+  else
+    log_error "Proof verification failed!"
+    exit 1
+  fi
+fi

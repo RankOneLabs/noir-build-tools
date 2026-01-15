@@ -29,24 +29,26 @@ source "$LIB_DIR/nargo.sh"
 
 usage() {
   cat << EOF
-Usage: noir-verifier [OPTIONS] CIRCUIT
+Usage: nbt verifier [OPTIONS] CIRCUIT
 
-Generate Solidity verifier contract.
+Generate verification key for off-chain verification.
 
 Options:
-  -o, --output   Output directory
-  -h, --help     Show this help
+  -o, --output FILE    Output VK file (default: target/vk)
+  -h, --help           Show this help
+
+For on-chain (Solidity) verifier, use: nbt sol-verifier
 
 Requires: bb (Barretenberg)
 EOF
 }
 
 CIRCUIT_NAME=""
-OUTPUT_DIR=""
+OUTPUT_FILE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -o|--output) OUTPUT_DIR="$2"; shift 2 ;;
+    -o|--output) OUTPUT_FILE="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     -*) die "Unknown option: $1" ;;
     *) CIRCUIT_NAME="$1"; shift ;;
@@ -61,39 +63,24 @@ backend_path=$(get_backend_path)
 require_cmd "$backend_path"
 
 circuit_path=$(get_circuit_field "$CIRCUIT_NAME" "path")
-output_dir="${OUTPUT_DIR:-$(get_config_path 'verifiers' './contracts/verifiers')}"
 
-log_info "Generating verifier for $CIRCUIT_NAME..."
+log_info "Generating verification key for $CIRCUIT_NAME..."
 
 nargo_compile "$circuit_path"
 
 artifact="$circuit_path/target/${CIRCUIT_NAME}.json"
 [[ -f "$artifact" ]] || die "Artifact not found: $artifact"
 
-log_info "Writing verification key..."
-vk_dir="$circuit_path/target"
-# Use --oracle_hash keccak for Solidity compatibility (keccak is used on-chain)
-(cd "$circuit_path" && "$backend_path" write_vk -b "target/${CIRCUIT_NAME}.json" -o "target" --oracle_hash keccak)
-vk_file="$vk_dir/vk"
+# Generate VK (no --oracle_hash needed for off-chain, but doesn't hurt)
+(cd "$circuit_path" && "$backend_path" write_vk -b "target/${CIRCUIT_NAME}.json" -o "target")
 
-log_info "Generating contract..."
-if "$backend_path" --help | grep -q "write_solidity_verifier"; then
-    # Newer bb versions (3.x)
-    (cd "$circuit_path" && "$backend_path" write_solidity_verifier -k "target/vk" -o "target/contract.sol")
+vk_file="$circuit_path/target/vk"
+[[ -f "$vk_file" ]] || die "VK not generated"
+
+# Copy to custom output if specified
+if [[ -n "$OUTPUT_FILE" ]]; then
+  cp "$vk_file" "$OUTPUT_FILE"
+  log_success "Generated: $OUTPUT_FILE"
 else
-    # Older bb versions
-    (cd "$circuit_path" && "$backend_path" contract)
+  log_success "Generated: $vk_file"
 fi
-
-contract_src="$circuit_path/target/contract.sol"
-if [[ ! -f "$contract_src" ]]; then
-    # Fallback to newer bb version which might output to logic specific file or stdout? 
-    # For now, just error if not found where expected.
-    die "Contract not generated at $contract_src"
-fi
-
-circuit_output_dir="$output_dir/$CIRCUIT_NAME"
-mkdir -p "$circuit_output_dir"
-cp "$contract_src" "$circuit_output_dir/Verifier.sol"
-
-log_success "Generated: $circuit_output_dir/Verifier.sol"

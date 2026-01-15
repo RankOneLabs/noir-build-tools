@@ -29,9 +29,9 @@ source "$LIB_DIR/nargo.sh"
 
 usage() {
   cat << EOF
-Usage: nbt verify-on-chain [OPTIONS] CIRCUIT
+Usage: nbt sol-verify [OPTIONS] CIRCUIT
 
-Generate a proof and verify it on-chain against the deployed verifier.
+Generate a proof and verify it on-chain against the deployed Solidity verifier.
 
 Options:
   --rpc-url URL        RPC URL (default: http://127.0.0.1:8545)
