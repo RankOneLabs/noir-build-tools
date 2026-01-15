@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_PATH="$(readlink -f "$0")"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../.." 2>/dev/null && pwd)"
+
+LIB_DIR=""
+for candidate in \
+  "$ROOT_DIR/lib" \
+  "$SCRIPT_DIR/../lib" \
+  "${NOIR_BUILD_TOOLS_LIB:-}" \
+  "$HOME/.local/lib/noir-build-tools" \
+  "/usr/local/lib/noir-build-tools"; do
+  if [[ -n "$candidate" && -f "$candidate/utils.sh" ]]; then
+    LIB_DIR="$candidate"
+    break
+  fi
+done
+
+if [[ -z "$LIB_DIR" ]]; then
+  echo "lib/utils.sh not found; set NOIR_BUILD_TOOLS_LIB" >&2
+  exit 1
+fi
+
+source "$LIB_DIR/utils.sh"
+source "$LIB_DIR/config.sh"
+source "$LIB_DIR/nargo.sh"
+
+usage() {
+  cat << EOF
+Usage: nbt sol-verifier [OPTIONS] CIRCUIT
+
+Generate Solidity verifier contract for on-chain verification.
+
+Options:
+  -o, --output   Output directory
+  -h, --help     Show this help
+
+Requires: bb (Barretenberg)
+EOF
+}
+
+CIRCUIT_NAME=""
+OUTPUT_DIR=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o|--output) OUTPUT_DIR="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    -*) die "Unknown option: $1" ;;
+    *) CIRCUIT_NAME="$1"; shift ;;
+  esac
+done
+
+[[ -n "$CIRCUIT_NAME" ]] || { usage; exit 1; }
+
+load_config
+
+backend_path=$(get_backend_path)
+require_cmd "$backend_path"
+
+circuit_path=$(get_circuit_field "$CIRCUIT_NAME" "path")
+output_dir="${OUTPUT_DIR:-$(get_config_path 'verifiers' './contracts/verifiers')}"
+
+log_info "Generating verifier for $CIRCUIT_NAME..."
+
+nargo_compile "$circuit_path"
+
+artifact="$circuit_path/target/${CIRCUIT_NAME}.json"
+[[ -f "$artifact" ]] || die "Artifact not found: $artifact"
+
+log_info "Writing verification key..."
+vk_dir="$circuit_path/target"
+# Use --oracle_hash keccak for Solidity compatibility (keccak is used on-chain)
+(cd "$circuit_path" && "$backend_path" write_vk -b "target/${CIRCUIT_NAME}.json" -o "target" --oracle_hash keccak)
+vk_file="$vk_dir/vk"
+
+log_info "Generating contract..."
+if "$backend_path" --help | grep -q "write_solidity_verifier"; then
+    # Newer bb versions (3.x)
+    (cd "$circuit_path" && "$backend_path" write_solidity_verifier -k "target/vk" -o "target/contract.sol")
+else
+    # Older bb versions
+    (cd "$circuit_path" && "$backend_path" contract)
+fi
+
+contract_src="$circuit_path/target/contract.sol"
+if [[ ! -f "$contract_src" ]]; then
+    # Fallback to newer bb version which might output to logic specific file or stdout? 
+    # For now, just error if not found where expected.
+    die "Contract not generated at $contract_src"
+fi
+
+circuit_output_dir="$output_dir/$CIRCUIT_NAME"
+mkdir -p "$circuit_output_dir"
+cp "$contract_src" "$circuit_output_dir/Verifier.sol"
+
+log_success "Generated: $circuit_output_dir/Verifier.sol"

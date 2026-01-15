@@ -1,17 +1,19 @@
 # noir-build-tools
 
-Config-driven build, test, profile, and verifier tooling for Noir circuits. Minimal dependencies: `nargo` and `jq` (plus optional `bb` for verifier generation).
+Config-driven build, test, profile, and proving tooling for Noir circuits. Minimal dependencies: `nargo` and `jq` (plus `bb` for proof generation/verification).
 
 ## Features
 - JSON config, no hardcoded paths
-- Compile, test, profile (with budgets), benchmark, verifier generation
+- Compile, test, profile (with budgets), benchmark
+- Off-chain proving and verification (`prove`, `verify`, `verifier`)
+- On-chain Solidity verifier generation and verification (`sol-verifier`, `sol-verify`)
 - Machine-readable output (`--json`, `--csv`), CI-friendly exit codes
-- No trusted setup required (UltraPlonk)
+- No trusted setup required (UltraHonk)
 
 ## Requirements
 - `nargo` (includes `noir-profiler`)
 - `jq`
-- Optional: `bb` for Solidity verifier generation
+- `bb` (Barretenberg) for proof generation and verification
 
 ## Install
 ```bash
@@ -27,23 +29,43 @@ nbt compile my_circuit         # compile one circuit
 nbt test --all                 # run tests for all circuits
 nbt profile --all              # profile constraints, exits 1 if over budget
 nbt benchmark my_circuit --csv # timing benchmarks
-nbt verifier my_circuit        # generate Solidity verifier
-nbt deploy my_circuit          # deploy Solidity verifier (forge)
 nbt report --all               # JSON report of constraints/budgets
 nbt doctor                     # check environment health
+
+# Off-chain proving workflow
+nbt verifier my_circuit        # generate verification key
+nbt prove my_circuit           # generate proof (auto-generates VK if needed)
+nbt verify my_circuit          # verify proof
+
+# On-chain (Solidity) workflow
+nbt sol-verifier my_circuit    # generate Solidity verifier contract
+nbt deploy my_circuit          # deploy verifier (via forge)
+nbt sol-verify my_circuit      # verify proof on-chain
 ```
 
 ## Commands
+
+### Setup & Info
 - `nbt init`: Creates `nbt.config.json` in the current directory.
 - `nbt list`: Prints circuits from the config with their paths and budgets.
+- `nbt doctor`: Checks environment for required tools (jq, nargo, bb).
+
+### Build & Test
 - `nbt compile [name|--all]`: Runs `nargo compile` in each circuit directory.
 - `nbt test [name|--all]`: Runs `nargo test` in each circuit directory.
 - `nbt profile [name|--all]`: Runs `nargo info`, sums constraints, and exits 1 if over `constraintBudget`.
 - `nbt benchmark [name|--all] [--csv]`: Runs `nargo execute` multiple times and reports timing.
-- `nbt verifier [name]`: Uses `bb` to emit Solidity verifier + vk artifacts into `paths.verifiers/<circuit>/`.
-- `nbt deploy [name]`: Deploys `paths.verifiers/<circuit>/Verifier.sol` via `forge create` (configurable rpc/private key). Falls back to env: `NBT_CIRCUIT`/`CIRCUIT`, `RPC_URL`, `PRIVATE_KEY`, `CONTRACT_NAME`, `CHAIN_ID`/`CHAINID`, `DRY_RUN`. Auto-deploys/link required libraries, broadcasts by default (add `--dry-run` to skip), and saves per-chain metadata (address, tx, chainId, libraries) to `paths.verifiers/<circuit>/deployment-<chainId>.json` (or `deployment.json` if unknown).
 - `nbt report [name|--all]`: Emits JSON summarizing constraints/budgets.
-- `nbt doctor`: Checks environment for required tools (jq, nargo).
+
+### Off-chain Proving (requires `bb`)
+- `nbt verifier [name]`: Generates verification key (VK) to `target/vk`.
+- `nbt prove [name]`: Compiles, executes witness, generates VK (if needed), and produces proof to `target/proof`. Also outputs `target/public_inputs`.
+- `nbt verify [name]`: Verifies a proof off-chain using VK, proof, and public inputs.
+
+### On-chain (Solidity) Workflow (requires `bb` + Foundry)
+- `nbt sol-verifier [name]`: Generates Solidity verifier contract to `paths.verifiers/<circuit>/`.
+- `nbt deploy [name]`: Deploys `paths.verifiers/<circuit>/Verifier.sol` via `forge create`. Env vars: `RPC_URL`, `PRIVATE_KEY`, `CONTRACT_NAME`, `CHAIN_ID`. Auto-deploys libraries, saves deployment metadata to `deployment-<chainId>.json`.
+- `nbt sol-verify [name]`: Verifies a proof on-chain against deployed Solidity verifier.
 
 ## End-to-end local workflow (example)
 1) **Install tools**
@@ -89,26 +111,39 @@ nbt profile --all     # exits 1 if any circuit exceeds its constraintBudget
 nbt benchmark my_circuit --csv  # averages over benchmarkRuns
 ```
 
-9) **Generate Solidity verifier** (requires `bb`)
+9) **Generate proof** (off-chain, requires `bb`)
 ```bash
-nbt verifier my_circuit
+nbt prove my_circuit
+# Compiles circuit, generates witness from Prover.toml, creates VK if needed, outputs proof
+# Outputs: target/proof, target/public_inputs, target/vk
+```
+
+10) **Verify proof off-chain**
+```bash
+nbt verify my_circuit
+# Verifies target/proof against target/vk using target/public_inputs
+```
+
+11) **Generate Solidity verifier** (on-chain, requires `bb`)
+```bash
+nbt sol-verifier my_circuit
 # Outputs Verifier.sol to paths.verifiers/<circuit>/ (default ./contracts/verifiers/<circuit>/)
 ```
 
-9b) **Deploy the verifier** (requires Foundry)
+12) **Deploy the verifier** (requires Foundry)
 ```bash
 nbt deploy my_circuit --rpc-url http://127.0.0.1:8545 --private-key 0x...
 # Defaults: rpc=http://127.0.0.1:8545, key=anvil default, contract name=HonkVerifier
-# Auto-deploys/link any libraries, broadcasts by default, and writes deployment-<chainId>.json under paths.verifiers/<circuit>/ with address, tx hash, chainId, libraries
+# Auto-deploys/link any libraries, broadcasts by default, and writes deployment-<chainId>.json
 # Add --dry-run (or DRY_RUN=true) to skip broadcasting
 ```
 
-10) **Produce a machine-readable report**
+13) **Produce a machine-readable report**
 ```bash
 nbt report --all > reports/summary.json
 ```
 
-11) **Test verifier on a local chain** (example flow)
+14) **Test verifier on a local chain** (example flow)
 - Start a local EVM (e.g., `anvil` or `hardhat node`).
 - Compile and deploy the generated Solidity verifier with your preferred tool (Foundry/Hardhat/Remix) using the vk and verifier artifacts from `paths.verifiers/<circuit>/` (file name is always Verifier.sol).
 - Generate a proof with `bb` or your proving pipeline, then call the verifier contract’s verify function on the local chain to confirm it accepts a valid proof and rejects an invalid one.
@@ -170,6 +205,16 @@ Tips:
 
 ## Config
 See `templates/nbt.config.json` for schema. Key fields: `circuits[].name`, `circuits[].path`, optional `constraintBudget`, `benchmarkRuns`, `paths.reports`, `paths.verifiers`, `backend.path`.
+
+## Testing
+Run the test suite (requires [bats](https://github.com/bats-core/bats-core)):
+```bash
+./tests/run-tests.sh
+```
+
+Tests include:
+- `tests/commands.bats`: Unit tests for command help/usage
+- `tests/integration.bats`: End-to-end tests with real circuits (compile, prove, verify)
 
 ## CI Example
 See `examples/github-workflow.yml` for GitHub Actions usage.
