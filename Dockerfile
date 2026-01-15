@@ -15,20 +15,15 @@ RUN curl -L https://raw.githubusercontent.com/noir-lang/noirup/main/install | ba
 ENV PATH="/root/.nargo/bin:$PATH"
 RUN noirup
 
+# Install bats
+RUN git clone https://github.com/bats-core/bats-core.git /tmp/bats && \
+    /tmp/bats/install.sh /usr/local && \
+    rm -rf /tmp/bats
+
 # Install bb (Barretenberg)
-RUN curl -L https://raw.githubusercontent.com/AztecProtocol/aztec-packages/master/barretenberg/cpp/scripts/install_bb.sh | bash
+RUN curl -L https://raw.githubusercontent.com/AztecProtocol/aztec-packages/refs/heads/next/barretenberg/bbup/install | bash
 ENV PATH="/root/.bb:$PATH"
-# Ensure bb is installed (the script might just install the updater?)
-# Usually the script installs 'bb'. Let's verify or run bbup if needed.
-# For simplicity, assuming the script puts bb in path or we need to look closer.
-# Alternative: curl release binary directly.
-# Let's use the explicit binary download if the handy script is flaky.
-# Using the one from noir-lang/noir releases? No, bb is separate.
-# Let's assume the install script works or try a known working pattern:
-# RUN curl -L https://github.com/AztecProtocol/aztec-packages/releases/download/barretenberg-v0.46.1/barretenberg-x86_64-linux-gnu.tar.gz | tar -xz -C /usr/local/bin
-# But pinning version is hard.
-# Let's try the simple install script again, but verify path.
-# Actually, nargo often manages bb via `nargo backend`? No, nbt uses `bb` CLI.
+RUN bbup
 
 # Install Foundry (forge, cast)
 RUN curl -L https://foundry.paradigm.xyz | bash
