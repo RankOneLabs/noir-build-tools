@@ -73,7 +73,6 @@ require_cmd "$backend_path"
 require_cmd nargo
 
 circuit_path=$(get_circuit_field "$CIRCUIT_NAME" "path")
-log_info "Circuit Path: $circuit_path"
 
 # Handle inputs file
 inputs_file="${INPUTS_FILE:-$circuit_path/Prover.toml}"
@@ -84,9 +83,9 @@ inputs_file="${INPUTS_FILE:-$circuit_path/Prover.toml}"
 if [[ -n "$INPUTS_FILE" && "$INPUTS_FILE" != "$circuit_path/Prover.toml" ]]; then
   # Define cleanup function to restore backup
   cleanup_inputs() {
-    log_info "Cleaning up..."
+    # log_info "Cleaning up..."
     if [[ -f "$circuit_path/Prover.toml.bak" ]]; then
-      log_info "Restoring backup..."
+      # log_info "Restoring backup..."
       mv "$circuit_path/Prover.toml.bak" "$circuit_path/Prover.toml"
     elif [[ -f "$circuit_path/Prover.toml" ]]; then
       # If no backup existed (meaning no original file), remove the temporary one
@@ -99,7 +98,7 @@ if [[ -n "$INPUTS_FILE" && "$INPUTS_FILE" != "$circuit_path/Prover.toml" ]]; the
 
   # Backup existing if present
   if [[ -f "$circuit_path/Prover.toml" ]]; then
-    log_info "Backing up Prover.toml..."
+    # log_info "Backing up Prover.toml..."
     mv "$circuit_path/Prover.toml" "$circuit_path/Prover.toml.bak"
   fi
   
