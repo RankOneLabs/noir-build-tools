@@ -215,6 +215,8 @@ Run the test suite (requires [bats](https://github.com/bats-core/bats-core)):
 Tests include:
 - `tests/commands.bats`: Unit tests for command help/usage
 - `tests/integration.bats`: End-to-end tests with real circuits (compile, prove, verify)
+- `tests/report.bats`: Tests for report generation and output formats
+- `tests/benchmark.bats`: Tests for benchmarking workflows and performance runs
 
 ## CI Example
 See `examples/github-workflow.yml` for GitHub Actions usage.
