@@ -20,3 +20,7 @@ Thumbs.db
 
 # Reports (generated)
 reports/
+
+# Dependencies
+node_modules/
+lib/testdata/node_modules/
