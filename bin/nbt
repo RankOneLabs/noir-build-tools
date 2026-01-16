@@ -33,16 +33,25 @@ Noir Build Tools (NBT)
 Usage: nbt <command> [options]
 
 Commands:
-  compile     Compile circuits
-  test        Run tests
-  profile     Profile constraints and check budgets
-  benchmark   Benchmark execution performance
-  verifier    Generate Solidity verifier
-  deploy      Deploy Solidity verifier (forge create)
-  list        List configured circuits
-  report      Generate JSON summary report
-  init        Initialize configuration
-  doctor      Check environment health
+  init          Initialize configuration
+  list          List configured circuits
+  doctor        Check environment health
+
+  compile       Compile circuits
+  test          Run tests
+  profile       Profile constraints and check budgets
+  benchmark     Benchmark execution performance
+  report        Generate JSON summary report
+  testdata      Generate circuit test data
+
+
+  verifier      Generate verification key (off-chain)
+  prove         Generate proof (off-chain)
+  verify        Verify proof (off-chain)
+
+  sol-verifier  Generate Solidity verifier (on-chain)
+  deploy        Deploy Solidity verifier (forge create)
+  sol-verify    Verify proof on-chain
 
 EOF
   exit 1
