@@ -17,6 +17,12 @@ cp lib/*.sh "$LIB_DIR/"
 cp lib/commands/* "$LIB_DIR/commands/"
 chmod +x "$LIB_DIR/commands/"*
 
+# Install testdata
+if [[ -d lib/testdata ]]; then
+    mkdir -p "$LIB_DIR/testdata"
+    cp -r lib/testdata/* "$LIB_DIR/testdata/"
+fi
+
 echo "Installed nbt to $BIN_DIR"
 echo "Installed libraries to $LIB_DIR"
 echo "Ensure $BIN_DIR is in your PATH"

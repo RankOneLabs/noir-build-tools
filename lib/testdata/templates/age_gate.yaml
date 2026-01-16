@@ -1,0 +1,38 @@
+name: age_gate
+description: Age verification with ECDSA-signed birthdate
+
+inputs:
+  birth_year: 1990
+  birth_month: 6
+  birth_day: 15
+  min_age: 18
+  current_year: 2026
+  current_month: 1
+  current_day: 10
+
+pipeline:
+  - id: message_hash
+    op: pedersenHash
+    args: 
+      - $birth_year
+      - $birth_month
+      - $birth_day
+
+  - id: signer
+    op: signSecp256k1
+    message: $message_hash
+
+outputs:
+  # Private
+  birth_year: $birth_year
+  birth_month: $birth_month
+  birth_day: $birth_day
+  signature: $signer.signature
+
+  # Public
+  current_year: $current_year
+  current_month: $current_month
+  current_day: $current_day
+  min_age: $min_age
+  issuer_pub_key_x: $signer.publicKeyX
+  issuer_pub_key_y: $signer.publicKeyY
