@@ -36,6 +36,7 @@ Profile circuit constraints and check budgets.
 
 Options:
   -a, --all      Profile all circuits
+  --prove        Generate proof and show proof size (requires Prover.toml)
   --json         Output as JSON
   -h, --help     Show this help
 
@@ -48,10 +49,12 @@ EOF
 PROFILE_ALL=false
 CIRCUIT_NAME=""
 OUTPUT_JSON=false
+SHOW_PROOF_SIZE=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -a|--all) PROFILE_ALL=true; shift ;;
+    --prove) SHOW_PROOF_SIZE=true; shift ;;
     --json) OUTPUT_JSON=true; shift ;;
     -h|--help) usage; exit 0 ;;
     -*) die "Unknown option: $1" ;;
@@ -86,13 +89,46 @@ for name in $circuits; do
   brillig=$(echo "$info" | jq -r '.brillig')
   total=$((acir + brillig))
 
+  # Generate proof and get size if --prove flag is set
+  proof_size=0
+  if [[ "$SHOW_PROOF_SIZE" == "true" ]]; then
+    if [[ -f "$circuit_path/Prover.toml" ]]; then
+      
+      backend_path=$(get_backend_path)
+      if ! command -v "$backend_path" &>/dev/null; then
+        log_warn "Backend '$backend_path' not found. Cannot generate proof."
+      else
+        # Execute to generate witness
+        nargo execute --package "$name" &>/dev/null 2>&1 || true
+        
+        # Generate proof (disable job control to suppress crash messages)
+        set +m
+        proof_out="$circuit_path/target/proof"
+        
+        # Run prove command and capture status
+        if ! "$backend_path" prove -b "$circuit_path/target/${name}.json" \
+                 -w "$circuit_path/target/${name}.gz" \
+                 -o "$proof_out" &>/dev/null; then
+            log_warn "Proof generation failed for $name"
+        fi
+        
+        set -m 2>/dev/null || true
+        
+        if [[ -f "$proof_out" ]]; then
+          # portable file size check (stat is non-portable between GNU/BSD)
+          proof_size=$(wc -c < "$proof_out" 2>/dev/null | tr -d '[:space:]' || echo "0")
+        fi
+      fi
+    fi
+  fi
+
   within_budget="true"
   if [[ "$budget" -gt 0 ]] && [[ "$total" -gt "$budget" ]]; then
     within_budget="false"
     ((over_budget_count++))
   fi
 
-  results+=("{\"name\":\"$name\",\"acir\":$acir,\"brillig\":$brillig,\"total\":$total,\"budget\":$budget,\"withinBudget\":$within_budget}")
+  results+=("{\"name\":\"$name\",\"acir\":$acir,\"brillig\":$brillig,\"total\":$total,\"budget\":$budget,\"proofSize\":$proof_size,\"withinBudget\":$within_budget}")
 done
 
 if [[ "$OUTPUT_JSON" == "true" ]]; then
@@ -104,21 +140,35 @@ if [[ "$OUTPUT_JSON" == "true" ]]; then
   echo "]"
 else
   echo ""
-  print_profile_header
+  if [[ "$SHOW_PROOF_SIZE" == "true" ]]; then
+    print_profile_header_with_proof
+  else
+    print_profile_header
+  fi
 
   for result in "${results[@]}"; do
     name=$(echo "$result" | jq -r '.name')
     acir=$(echo "$result" | jq -r '.acir')
     brillig=$(echo "$result" | jq -r '.brillig')
     total=$(echo "$result" | jq -r '.total')
+    proof_size=$(echo "$result" | jq -r '.proofSize')
     within=$(echo "$result" | jq -r '.withinBudget')
     status=$(format_status "$within")
 
-    printf "| %-20s | %12s | %12s | %12s | %10s |\n" \
-      "$name" "$(format_number "$acir")" "$(format_number "$brillig")" "$(format_number "$total")" "$status"
+    if [[ "$SHOW_PROOF_SIZE" == "true" ]]; then
+      printf "| %-20s | %12s | %12s | %12s | %12s | %10s |\n" \
+        "$name" "$(format_number "$acir")" "$(format_number "$brillig")" "$(format_number "$total")" "$(format_bytes "$proof_size")" "$status"
+    else
+      printf "| %-20s | %12s | %12s | %12s | %10s |\n" \
+        "$name" "$(format_number "$acir")" "$(format_number "$brillig")" "$(format_number "$total")" "$status"
+    fi
   done
 
-  print_separator
+  if [[ "$SHOW_PROOF_SIZE" == "true" ]]; then
+    print_separator_with_proof
+  else
+    print_separator
+  fi
   echo ""
 
   if [[ $over_budget_count -gt 0 ]]; then

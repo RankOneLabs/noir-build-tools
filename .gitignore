@@ -24,3 +24,7 @@ reports/
 # Dependencies
 node_modules/
 lib/testdata/node_modules/
+
+# Exploratory scripts (keep primitives.mjs, ignore debugging scripts)
+lib/testdata/test_*.mjs
+lib/testdata/list_*.mjs

@@ -77,6 +77,7 @@ teardown() {
   
   [ "$(echo "$output" | jq '.[0].name')" == "\"test_circuit\"" ]
   [ "$(echo "$output" | jq '.[0] | has("compileAvg")')" == "true" ]
+  [ "$(echo "$output" | jq '.[0] | has("executeAvg")')" == "true" ]
   [ "$(echo "$output" | jq '.[0] | has("proveAvg")')" == "true" ]
   [ "$(echo "$output" | jq '.[0].runs')" == "1" ]
 }
@@ -85,8 +86,8 @@ teardown() {
   run nbt benchmark test_circuit -n 1 --csv
   [ "$status" -eq 0 ]
   
-  # Check header
-  [[ "${lines[0]}" == "circuit,acir,brillig,compile_ms,prove_ms,runs" ]]
+  # Check header (includes execute_ms for witness generation timing)
+  [[ "${lines[0]}" == "circuit,acir,brillig,compile_ms,execute_ms,prove_ms,runs" ]]
   # Check data row
   [[ "${lines[1]}" == *"test_circuit"* ]]
 }
