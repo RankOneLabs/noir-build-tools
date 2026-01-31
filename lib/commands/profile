@@ -93,16 +93,30 @@ for name in $circuits; do
   proof_size=0
   if [[ "$SHOW_PROOF_SIZE" == "true" ]]; then
     if [[ -f "$circuit_path/Prover.toml" ]]; then
-      # Execute to generate witness
-      nargo execute --package "$name" &>/dev/null 2>&1 || true
-      # Generate proof (disable job control to suppress crash messages)
-      set +m
-      { bb prove -b "$circuit_path/target/${name}.json" \
-               -w "$circuit_path/target/${name}.gz" \
-               -o "$circuit_path/target/proof"; } &>/dev/null 2>&1 || true
-      set -m 2>/dev/null || true
-      if [[ -f "$circuit_path/target/proof" ]]; then
-        proof_size=$(stat -c%s "$circuit_path/target/proof" 2>/dev/null || echo "0")
+      
+      backend_path=$(get_backend_path)
+      if ! command -v "$backend_path" &>/dev/null; then
+        log_warn "Backend '$backend_path' not found. Cannot generate proof."
+      else
+        # Execute to generate witness
+        nargo execute --package "$name" &>/dev/null 2>&1 || true
+        
+        # Generate proof (disable job control to suppress crash messages)
+        set +m
+        proof_out="$circuit_path/target/proof"
+        
+        # Run prove command and capture status
+        if ! "$backend_path" prove -b "$circuit_path/target/${name}.json" \
+                 -w "$circuit_path/target/${name}.gz" \
+                 -o "$proof_out" &>/dev/null; then
+            log_warn "Proof generation failed for $name"
+        fi
+        
+        set -m 2>/dev/null || true
+        
+        if [[ -f "$proof_out" ]]; then
+          proof_size=$(stat -c%s "$proof_out" 2>/dev/null || echo "0")
+        fi
       fi
     fi
   fi
