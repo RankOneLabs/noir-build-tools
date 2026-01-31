@@ -85,8 +85,8 @@ teardown() {
   run nbt benchmark test_circuit -n 1 --csv
   [ "$status" -eq 0 ]
   
-  # Check header
-  [[ "${lines[0]}" == "circuit,acir,brillig,compile_ms,prove_ms,runs" ]]
+  # Check header (includes execute_ms for witness generation timing)
+  [[ "${lines[0]}" == "circuit,acir,brillig,compile_ms,execute_ms,prove_ms,runs" ]]
   # Check data row
   [[ "${lines[1]}" == *"test_circuit"* ]]
 }

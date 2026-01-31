@@ -29,14 +29,19 @@ source "$LIB_DIR/nargo.sh"
 
 usage() {
   cat << EOF
-Usage: noir-benchmark [OPTIONS] [CIRCUIT]
+Usage: nbt benchmark [OPTIONS] [CIRCUIT]
+
+Benchmark circuit compilation, witness generation, and ZK proof generation.
 
 Options:
   -a, --all      Benchmark all circuits
   -n, --runs N   Number of runs (default: from config or 5)
   --json         Output as JSON
   --csv          Output as CSV
+  --no-prove     Skip ZK proof generation (only compile + execute)
   -h, --help     Show this help
+
+Note: ZK proof generation requires 'bb' (Barretenberg) and Prover.toml inputs.
 EOF
 }
 
@@ -45,6 +50,7 @@ CIRCUIT_NAME=""
 NUM_RUNS=""
 OUTPUT_JSON=false
 OUTPUT_CSV=false
+SKIP_PROVE=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -52,6 +58,7 @@ while [[ $# -gt 0 ]]; do
     -n|--runs) NUM_RUNS="$2"; shift 2 ;;
     --json) OUTPUT_JSON=true; shift ;;
     --csv) OUTPUT_CSV=true; shift ;;
+    --no-prove) SKIP_PROVE=true; shift ;;
     -h|--help) usage; exit 0 ;;
     -*) die "Unknown option: $1" ;;
     *) CIRCUIT_NAME="$1"; shift ;;
@@ -68,6 +75,9 @@ else
   usage; exit 1
 fi
 
+# Get backend path (bb)
+backend_path=$(get_backend_path)
+
 time_ms() {
   local start end
   start=$(date +%s%3N)
@@ -83,6 +93,24 @@ calc_avg() {
   echo $((sum / ${#vals[@]}))
 }
 
+# Generate ZK proof using bb and return timing
+bb_prove() {
+  local circuit_path="$1"
+  local name="$2"
+  
+  local artifact="$circuit_path/target/${name}.json"
+  local witness="$circuit_path/target/${name}.gz"
+  local vk="$circuit_path/target/vk"
+  
+  # Generate VK if needed (not timed - one-time cost)
+  if [[ ! -f "$vk" ]]; then
+    "$backend_path" write_vk -b "$artifact" -o "$circuit_path/target" &>/dev/null
+  fi
+  
+  # Time the actual proof generation
+  "$backend_path" prove -b "$artifact" -w "$witness" -k "$vk" -o "$circuit_path/target" &>/dev/null
+}
+
 declare -a results=()
 
 for name in $circuits; do
@@ -92,45 +120,75 @@ for name in $circuits; do
   [[ "$OUTPUT_JSON" != "true" && "$OUTPUT_CSV" != "true" ]] && \
     log_info "Benchmarking $name ($runs runs)..."
 
+  # Initial compile
   nargo_compile "$circuit_path" &>/dev/null
   info=$(nargo_info "$circuit_path")
   acir=$(echo "$info" | jq -r '.acir')
   brillig=$(echo "$info" | jq -r '.brillig')
 
+  # Check if we can run prove benchmarks
+  can_prove=false
+  if [[ "$SKIP_PROVE" != "true" && -f "$circuit_path/Prover.toml" ]]; then
+    if command -v "$backend_path" &>/dev/null; then
+      can_prove=true
+    else
+      [[ "$OUTPUT_JSON" != "true" && "$OUTPUT_CSV" != "true" ]] && \
+        log_warn "Skipping prove benchmark: bb not found"
+    fi
+  fi
+
   # Warmup
   nargo_compile "$circuit_path" &>/dev/null
+  if [[ "$can_prove" == "true" ]]; then
+    nargo_execute "$circuit_path" &>/dev/null || true
+  fi
 
   declare -a compile_times=()
+  declare -a execute_times=()
   declare -a prove_times=()
 
   for ((i=1; i<=runs; i++)); do
+    # Compile timing
     compile_times+=("$(time_ms nargo_compile "$circuit_path")")
+    
+    # Execute (witness generation) timing
     if [[ -f "$circuit_path/Prover.toml" ]]; then
-      prove_times+=("$(time_ms run_nargo "$circuit_path" prove)")
+      execute_times+=("$(time_ms nargo_execute "$circuit_path")")
+    fi
+    
+    # ZK Proof generation timing (bb prove)
+    if [[ "$can_prove" == "true" ]]; then
+      prove_times+=("$(time_ms bb_prove "$circuit_path" "$name")")
     fi
   done
 
   compile_avg=$(calc_avg compile_times)
+  
+  execute_avg=0
+  [[ ${#execute_times[@]} -gt 0 ]] && execute_avg=$(calc_avg execute_times)
+  
   prove_avg=0
   [[ ${#prove_times[@]} -gt 0 ]] && prove_avg=$(calc_avg prove_times)
 
-  results+=("{\"name\":\"$name\",\"acir\":$acir,\"brillig\":$brillig,\"compileAvg\":$compile_avg,\"proveAvg\":$prove_avg,\"runs\":$runs}")
-  unset compile_times prove_times
+  results+=("{\"name\":\"$name\",\"acir\":$acir,\"brillig\":$brillig,\"compileAvg\":$compile_avg,\"executeAvg\":$execute_avg,\"proveAvg\":$prove_avg,\"runs\":$runs}")
+  unset compile_times execute_times prove_times
 done
 
 if [[ "$OUTPUT_JSON" == "true" ]]; then
   echo "["; for i in "${!results[@]}"; do [[ $i -gt 0 ]] && echo ","; echo "  ${results[$i]}"; done; echo "]"
 elif [[ "$OUTPUT_CSV" == "true" ]]; then
-  echo "circuit,acir,brillig,compile_ms,prove_ms,runs"
-  for r in "${results[@]}"; do echo "$r" | jq -r '[.name,.acir,.brillig,.compileAvg,.proveAvg,.runs] | @csv'; done
+  echo "circuit,acir,brillig,compile_ms,execute_ms,prove_ms,runs"
+  for r in "${results[@]}"; do echo "$r" | jq -r '[.name,.acir,.brillig,.compileAvg,.executeAvg,.proveAvg,.runs] | @csv'; done
 else
   echo -e "\n${BOLD}Benchmark Results${NC}\n"
-  printf "| %-20s | %12s | %12s | %12s | %12s |\n" "Circuit" "ACIR" "Brillig" "Compile" "Prove"
-  echo "+----------------------+--------------+--------------+--------------+--------------+"
+  printf "| %-20s | %8s | %8s | %10s | %10s | %10s |\n" "Circuit" "ACIR" "Brillig" "Compile" "Execute" "Prove"
+  echo "+----------------------+----------+----------+------------+------------+------------+"
   for r in "${results[@]}"; do
-    printf "| %-20s | %12s | %12s | %10s ms | %10s ms |\n" \
+    printf "| %-20s | %8s | %8s | %8s ms | %8s ms | %8s ms |\n" \
       "$(echo "$r"|jq -r '.name')" "$(echo "$r"|jq -r '.acir')" "$(echo "$r"|jq -r '.brillig')" \
-      "$(echo "$r"|jq -r '.compileAvg')" "$(echo "$r"|jq -r '.proveAvg')"
+      "$(echo "$r"|jq -r '.compileAvg')" "$(echo "$r"|jq -r '.executeAvg')" "$(echo "$r"|jq -r '.proveAvg')"
   done
-  echo "+----------------------+--------------+--------------+--------------+--------------+"
+  echo "+----------------------+----------+----------+------------+------------+------------+"
+  echo ""
+  echo "Compile: nargo compile | Execute: nargo execute (witness) | Prove: bb prove (ZK proof)"
 fi
