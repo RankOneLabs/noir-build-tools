@@ -77,6 +77,7 @@ teardown() {
   
   [ "$(echo "$output" | jq '.[0].name')" == "\"test_circuit\"" ]
   [ "$(echo "$output" | jq '.[0] | has("compileAvg")')" == "true" ]
+  [ "$(echo "$output" | jq '.[0] | has("executeAvg")')" == "true" ]
   [ "$(echo "$output" | jq '.[0] | has("proveAvg")')" == "true" ]
   [ "$(echo "$output" | jq '.[0].runs')" == "1" ]
 }
